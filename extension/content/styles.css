@@ -1,0 +1,93 @@
+/* Subtitle AI - Content Overlay Styles */
+
+#subtitle-ai-overlay-container {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2147483647;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-sizing: border-box;
+  transition: all 0.15s ease-out;
+}
+
+#subtitle-ai-overlay-container.position-bottom {
+  bottom: 8%;
+  left: 0;
+  right: 0;
+}
+
+#subtitle-ai-overlay-container.position-above-bottom {
+  bottom: 16%;
+  left: 0;
+  right: 0;
+}
+
+#subtitle-ai-overlay-container.position-center {
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+}
+
+#subtitle-ai-overlay-container.position-top {
+  top: 8%;
+  left: 0;
+  right: 0;
+}
+
+.subtitle-ai-cue-box {
+  display: inline-block;
+  text-align: center;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.15s ease-out;
+  opacity: 0;
+  transform: translateY(4px);
+  user-select: none;
+}
+
+.subtitle-ai-cue-box.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.subtitle-ai-cue-box.partial {
+  opacity: 0.88;
+}
+
+/* Outline classes */
+.outline-none {
+  text-shadow: none !important;
+}
+
+.outline-thin {
+  text-shadow:
+    -1px -1px 0 var(--sub-outline-color, #000),
+     1px -1px 0 var(--sub-outline-color, #000),
+    -1px  1px 0 var(--sub-outline-color, #000),
+     1px  1px 0 var(--sub-outline-color, #000) !important;
+}
+
+.outline-medium {
+  text-shadow:
+    -2px -2px 0 var(--sub-outline-color, #000),
+     2px -2px 0 var(--sub-outline-color, #000),
+    -2px  2px 0 var(--sub-outline-color, #000),
+     2px  2px 0 var(--sub-outline-color, #000),
+     0px  2px 4px rgba(0, 0, 0, 0.8) !important;
+}
+
+.outline-thick {
+  text-shadow:
+    -2px -2px 0 var(--sub-outline-color, #000),
+     2px -2px 0 var(--sub-outline-color, #000),
+    -2px  2px 0 var(--sub-outline-color, #000),
+     2px  2px 0 var(--sub-outline-color, #000),
+    -3px  0px 0 var(--sub-outline-color, #000),
+     3px  0px 0 var(--sub-outline-color, #000),
+     0px -3px 0 var(--sub-outline-color, #000),
+     0px  3px 0 var(--sub-outline-color, #000),
+     0px  3px 6px rgba(0, 0, 0, 0.9) !important;
+}

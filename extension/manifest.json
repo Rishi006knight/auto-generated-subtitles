@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Subtitle AI - Real-Time Video Subtitles",
+  "version": "1.0.0",
+  "description": "Watch any video on the web and get automatically generated subtitles in real time using streaming Whisper ASR.",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "Subtitle AI"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "shared/settings.js",
+        "content/overlay.js",
+        "content/video-detector.js"
+      ],
+      "css": ["content/styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
