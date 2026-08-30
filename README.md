@@ -1,11 +1,12 @@
 # 🎙️ Subtitle AI — Production Real-Time Streaming Subtitle Generator
 
-> Watch any video on any website and get automatically generated subtitles in real time with synchronized timing, customizable typography, and low-latency Whisper ASR.
+> Watch any video on any website and get automatically generated subtitles in real time with synchronized timing, customizable typography, low-latency Whisper ASR, and **Smart Auto-Pause**.
 
 ---
 
 ## 🚀 Key Production Features & Improvements
 
+- **⏸️ Smart Auto-Pause (Anti-Desync Buffer)**: Eliminates subtitle desynchronization. If the backend ASR worker queue experiences lag (queue depth &ge; 3), the backend emits `lag_warning`. The extension seamlessly pauses the `<video>` element and shows an elegant `⏳ Syncing subtitles...` toast. Once the queue clears, the backend emits `lag_clear`, the video automatically resumes, and subtitles stay in 100% lockstep!
 - **⚡ Client-Side VAD & Silence Gating**: The extension computes RMS audio energy in the offscreen document and suppresses streaming during background silence or music, saving bandwidth and backend GPU compute.
 - **🛡️ Whisper Hallucination Defense**: Filters hallucinated segments (`no_speech_prob > 0.6`, `avg_logprob < -1.0`, repetition compression ratio anomalies, and known phantom text loops).
 - **🖥️ Fullscreen Trap Fix**: Automatically detects `fullscreenchange` and reparents the subtitle overlay into `document.fullscreenElement` so subtitles remain on top in true fullscreen mode.
@@ -28,20 +29,24 @@
 │  ┌──────────────────────┐     ┌──────────────────────┐ │
 │  │  Content Script      │     │  chrome.tabCapture   │ │
 │  │  - Video Detector    │     │  - Client-Side VAD   │ │
-│  │  - Fullscreen Reparent│    │  - 16kHz Mono PCM    │ │
-│  │  - Anti-Flicker Buff │     │  - Ping/Pong Latency │ │
+│  │  - Smart Auto-Pause  │◄────┤  - 16kHz Mono PCM    │ │
+│  │  - Fullscreen Reparent     │  - Ping/Pong Latency │ │
+│  │  - Anti-Flicker Buff │     │  - Control Msg Relay │ │
 │  └──────────▲───────────┘     └──────────┬───────────┘ │
 └─────────────┼────────────────────────────┼─────────────┘
               │ Subtitle Cues (JSON)       │ Binary Audio Frames
-              │ {id, start, end, text...}  │ (Speech only)
+              │ Control (lag_warning/clear)│ (Speech only)
 ┌─────────────┴────────────────────────────▼─────────────┐
 │                    FASTAPI BACKEND                     │
 │                                                        │
 │  WebSocket Handler (/ws/transcribe/{sessionId})        │
 │    │                                                   │
+│    ├──► Session Queue Manager & Lag Monitor            │
+│    │      (Emits lag_warning / lag_clear)              │
+│    │                                                   │
 │    ├──► Silero VAD (Server Speech Segmentation)        │
 │    │                                                   │
-│    ├──► faster-whisper (asyncio.Lock Mutex)            │
+│    ├──► faster-whisper Worker (asyncio.Lock Mutex)     │
 │    │      - Hallucination Filter (no_speech_prob)      │
 │    │      - Word Timestamps & Confidence Scores        │
 │    │                                                   │
@@ -93,9 +98,10 @@ npm run build
 
 1. Open `demo-player/index.html` in Chrome.
 2. Click the **Subtitle AI** extension icon in your Chrome toolbar.
-3. Select your preferred style preset (**Netflix**, **Classic**, **High Contrast**, **Accessible**, or **Custom**).
-4. Click **Generate Subtitles**.
-5. Click **"Speak Dialogue"** in the testbed player to watch real-time synchronized subtitles appear over the video!
+3. Verify that **Smart Auto-Pause** toggle is enabled.
+4. Select your preferred style preset (**Netflix**, **Classic**, **High Contrast**, **Accessible**, or **Custom**).
+5. Click **Generate Subtitles**.
+6. Click **"Speak Dialogue"** in the testbed player to watch real-time synchronized subtitles appear over the video!
 
 ---
 

@@ -4,7 +4,8 @@
  * Production Features:
  * - Fullscreen Trap Solution: Reparents into document.fullscreenElement on fullscreenchange
  * - Chunk-ID in-place update: Seamlessly replaces partial text with final text without reflow flicker
- * - Anti-Flicker Partial Buffering: 150ms debounce for high-frequency partial updates
+ * - Anti-Flicker Partial Buffering: 120ms debounce for high-frequency partial updates
+ * - Smart Auto-Pause Toast: Visual feedback ("⏳ Syncing subtitles...") when backend buffers catch up
  * - Dynamic Styles & Presets: Real-time synchronization with user customization
  */
 
@@ -23,6 +24,7 @@ interface SubtitlePayload {
 class SubtitleOverlayManager {
   private container: HTMLDivElement | null = null;
   private cueBox: HTMLDivElement | null = null;
+  private bufferToast: HTMLDivElement | null = null;
   private currentSettings: any = null;
   private targetVideo: HTMLVideoElement | null = null;
   private hideTimeout: any = null;
@@ -94,7 +96,6 @@ class SubtitleOverlayManager {
 
     const fullscreenEl = document.fullscreenElement || (document as any).webkitFullscreenElement;
     if (fullscreenEl) {
-      // Reparent overlay directly inside the fullscreen container
       if (this.container.parentElement !== fullscreenEl) {
         fullscreenEl.appendChild(this.container);
       }
@@ -105,7 +106,6 @@ class SubtitleOverlayManager {
       this.container.style.height = "100%";
       this.container.style.zIndex = "2147483647";
     } else {
-      // Exit fullscreen: return to document.body
       if (this.container.parentElement !== document.body) {
         document.body.appendChild(this.container);
       }
@@ -138,7 +138,6 @@ class SubtitleOverlayManager {
     const chunkId = cue.id || "default";
 
     if (isFinal) {
-      // Cancel pending partial debounce
       if (this.partialDebounceTimer) {
         clearTimeout(this.partialDebounceTimer);
         this.partialDebounceTimer = null;
@@ -146,7 +145,6 @@ class SubtitleOverlayManager {
       this.activeChunkId = chunkId;
       this.renderText(cue.text, false);
 
-      // Auto clear after end timestamp
       if (this.hideTimeout) clearTimeout(this.hideTimeout);
       const displayDurationSec = Math.max(1.5, (cue.end - cue.start) || 3.5);
       this.hideTimeout = setTimeout(() => {
@@ -155,7 +153,6 @@ class SubtitleOverlayManager {
         }
       }, displayDurationSec * 1000);
     } else {
-      // Partial update: Anti-flicker 120ms debounce
       this.activeChunkId = chunkId;
       this.pendingPartialText = cue.text;
 
@@ -183,6 +180,26 @@ class SubtitleOverlayManager {
     }
   }
 
+  public showBufferingToast() {
+    if (!this.bufferToast) {
+      this.bufferToast = document.createElement("div");
+      this.bufferToast.id = "subtitle-ai-buffering-toast";
+      this.bufferToast.innerHTML = `<span class="toast-spinner"></span> Syncing subtitles...`;
+      if (this.container) {
+        this.container.appendChild(this.bufferToast);
+      } else {
+        document.body.appendChild(this.bufferToast);
+      }
+    }
+    this.bufferToast.classList.add("visible");
+  }
+
+  public hideBufferingToast() {
+    if (this.bufferToast) {
+      this.bufferToast.classList.remove("visible");
+    }
+  }
+
   public clear() {
     if (this.cueBox) {
       this.cueBox.classList.remove("visible");
@@ -203,17 +220,14 @@ class SubtitleOverlayManager {
     if (!settings || !this.cueBox || !this.container) return;
     this.currentSettings = settings;
 
-    // 1. Position
     this.container.className = `position-${settings.position || "bottom"}`;
 
-    // 2. Typography & Colors
     const fontSize = settings.fontSize || 22;
     this.cueBox.style.fontSize = `${fontSize}px`;
     this.cueBox.style.color = settings.textColor || "#ffffff";
     this.cueBox.style.fontFamily = settings.fontFamily || "sans-serif";
     this.cueBox.style.fontWeight = "600";
 
-    // 3. Background & Opacity
     const hexBg = settings.backgroundColor || "#000000";
     const opacity = settings.backgroundOpacity !== undefined ? settings.backgroundOpacity : 0.75;
     this.cueBox.style.backgroundColor = this.hexToRgba(hexBg, opacity);
@@ -221,7 +235,6 @@ class SubtitleOverlayManager {
     this.cueBox.style.borderRadius = `${settings.borderRadius || 6}px`;
     this.cueBox.style.maxWidth = `${settings.maxWidth || 80}%`;
 
-    // 4. Text Outline
     const outlineType = settings.textOutline || "none";
     this.cueBox.className = `subtitle-ai-cue-box ${this.cueBox.classList.contains("visible") ? "visible" : ""} outline-${outlineType}`;
     this.cueBox.style.setProperty("--sub-outline-color", settings.outlineColor || "#000000");
@@ -249,5 +262,4 @@ class SubtitleOverlayManager {
   }
 }
 
-// Global instance
 (window as any).subtitleOverlay = new SubtitleOverlayManager();

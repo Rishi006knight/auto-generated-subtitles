@@ -34,7 +34,7 @@ const PRESETS = {
   highContrast: {
     name: "High Contrast",
     fontSize: 24,
-    textColor: "#ffff00", // Yellow
+    textColor: "#ffff00",
     backgroundColor: "#000000",
     backgroundOpacity: 0.95,
     textOutline: "medium",
@@ -77,10 +77,10 @@ const DEFAULT_SETTINGS = {
   offset: 0.0,
   language: "auto",
   model: "base",
+  autoPauseEnabled: true,
   wsUrl: "ws://127.0.0.1:8000/ws/transcribe",
 };
 
-// Helper to load settings from Chrome Storage with fallback
 async function getStoredSettings() {
   return new Promise((resolve) => {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
@@ -97,7 +97,6 @@ async function getStoredSettings() {
   });
 }
 
-// Helper to save settings
 async function saveStoredSettings(settings) {
   return new Promise((resolve) => {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {

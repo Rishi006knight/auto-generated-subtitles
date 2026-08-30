@@ -7,6 +7,7 @@
  * - High-speed downsampling to 16kHz mono 16-bit PCM
  * - Client-side VAD energy gating to prevent sending silent audio
  * - Ping/Pong heartbeat for dynamic RTT latency calculation
+ * - Smart Auto-Pause Control message routing (lag_warning, lag_clear)
  * - Chunk-ID aware subtitle message dispatching to active tab
  */
 
@@ -112,8 +113,6 @@ async function startCapture(payload: {
       offset: offset || 0.0,
     }));
     notifyStatus("connected");
-
-    // Start periodic RTT measurement ping
     startHeartbeatPing();
   };
 
@@ -121,12 +120,23 @@ async function startCapture(payload: {
     try {
       const data = JSON.parse(event.data);
 
+      // Handle Smart Auto-Pause Control Messages from Backend
+      if (data.type === "control") {
+        chrome.runtime.sendMessage({
+          target: "content",
+          tabId: targetTabId,
+          type: "CONTROL_ACTION",
+          action: data.action, // 'lag_warning' or 'lag_clear'
+          queue_size: data.queue_size,
+        });
+        return;
+      }
+
       if (data.type === "pong") {
-        // Calculate dynamic round-trip time
         const now = performance.now();
         currentEstimatedRttMs = Math.max(10, Math.round(now - data.client_time));
       } else if (data.type === "subtitle" || data.type === "partial" || data.type === "final") {
-        // Forward subtitle to active tab content script
+        // Forward subtitle cue to active tab content script
         chrome.runtime.sendMessage({
           target: "content",
           tabId: targetTabId,
@@ -170,15 +180,13 @@ async function startCapture(payload: {
       sumSquares += resampledData[i] * resampledData[i];
     }
     const rmsEnergy = Math.sqrt(sumSquares / resampledData.length);
-    const speechThreshold = 0.008; // Audio speech energy threshold
+    const speechThreshold = 0.008;
 
     const pcm16Data = convertFloat32ToInt16(resampledData);
 
     if (rmsEnergy >= speechThreshold) {
-      // Speech detected
       if (!isSpeechActive) {
         isSpeechActive = true;
-        // Send pre-roll audio buffer so speech onset is never truncated
         while (prerollChunks.length > 0) {
           const preChunk = prerollChunks.shift();
           if (preChunk) socket.send(preChunk.buffer);
@@ -187,21 +195,17 @@ async function startCapture(payload: {
       silenceFramesCount = 0;
       socket.send(pcm16Data.buffer);
     } else {
-      // Silence / Background Noise
       silenceFramesCount++;
-      // Keep a rolling pre-roll buffer
       prerollChunks.push(pcm16Data);
       if (prerollChunks.length > MAX_PREROLL_CHUNKS) {
         prerollChunks.shift();
       }
 
-      // Hangover: send up to 4 silence frames (~300ms) after speech ends for clean boundary
       if (isSpeechActive && silenceFramesCount < 5) {
         socket.send(pcm16Data.buffer);
       } else if (isSpeechActive && silenceFramesCount >= 5) {
         isSpeechActive = false;
       } else {
-        // Send silence ping every 2.5s to keep WebSocket alive without wasting audio bandwidth
         const now = performance.now();
         if (now - lastSilencePingTime > 2500) {
           lastSilencePingTime = now;

@@ -1,40 +1,44 @@
 /**
- * Subtitle AI - Popup Controller (Vanilla JS build)
+ * Subtitle AI - Popup Controller
  */
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const statusDot = document.getElementById("status-dot");
-  const statusText = document.getElementById("status-text");
-  const toggleBtn = document.getElementById("toggle-capture-btn");
-  const btnIcon = toggleBtn.querySelector(".btn-icon");
-  const btnText = toggleBtn.querySelector(".btn-text");
-  const langSelect = document.getElementById("language-select");
-  const modelSelect = document.getElementById("model-select");
-  const wsUrlInput = document.getElementById("ws-url-input");
-  const autoPauseToggle = document.getElementById("auto-pause-toggle");
+  // DOM Elements - Controls
+  const statusDot = document.getElementById("status-dot") as HTMLElement;
+  const statusText = document.getElementById("status-text") as HTMLElement;
+  const toggleBtn = document.getElementById("toggle-capture-btn") as HTMLButtonElement;
+  const btnIcon = toggleBtn.querySelector(".btn-icon") as HTMLElement;
+  const btnText = toggleBtn.querySelector(".btn-text") as HTMLElement;
+  const langSelect = document.getElementById("language-select") as HTMLSelectElement;
+  const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
+  const wsUrlInput = document.getElementById("ws-url-input") as HTMLInputElement;
+  const autoPauseToggle = document.getElementById("auto-pause-toggle") as HTMLInputElement;
 
-  const offsetDisplay = document.getElementById("offset-display");
-  const offsetMinus = document.getElementById("offset-minus");
-  const offsetPlus = document.getElementById("offset-plus");
-  const offsetReset = document.getElementById("offset-reset");
+  // Offset Steppers
+  const offsetDisplay = document.getElementById("offset-display") as HTMLElement;
+  const offsetMinus = document.getElementById("offset-minus") as HTMLButtonElement;
+  const offsetPlus = document.getElementById("offset-plus") as HTMLButtonElement;
+  const offsetReset = document.getElementById("offset-reset") as HTMLButtonElement;
 
+  // DOM Elements - Styling & Customization
   const tabBtns = document.querySelectorAll(".tab-btn");
   const tabContents = document.querySelectorAll(".tab-content");
   const presetBtns = document.querySelectorAll(".preset-btn");
-  const previewCue = document.getElementById("preview-cue");
-  const fontSizeSlider = document.getElementById("font-size-slider");
-  const fontSizeVal = document.getElementById("font-size-val");
-  const bgOpacitySlider = document.getElementById("bg-opacity-slider");
-  const bgOpacityVal = document.getElementById("bg-opacity-val");
-  const textColorPicker = document.getElementById("text-color-picker");
+  const previewCue = document.getElementById("preview-cue") as HTMLElement;
+  const fontSizeSlider = document.getElementById("font-size-slider") as HTMLInputElement;
+  const fontSizeVal = document.getElementById("font-size-val") as HTMLElement;
+  const bgOpacitySlider = document.getElementById("bg-opacity-slider") as HTMLInputElement;
+  const bgOpacityVal = document.getElementById("bg-opacity-val") as HTMLElement;
+  const textColorPicker = document.getElementById("text-color-picker") as HTMLInputElement;
   const colorSwatches = document.querySelectorAll(".color-swatch");
-  const outlineSelect = document.getElementById("outline-select");
-  const positionSelect = document.getElementById("position-select");
-  const fontFamilySelect = document.getElementById("font-family-select");
+  const outlineSelect = document.getElementById("outline-select") as HTMLSelectElement;
+  const positionSelect = document.getElementById("position-select") as HTMLSelectElement;
+  const fontFamilySelect = document.getElementById("font-family-select") as HTMLSelectElement;
 
-  let currentSettings = await getStoredSettings();
+  let currentSettings: any = await getStoredSettings();
   let appState = { isCapturing: false, status: "idle" };
 
+  // 1. Tab Switching
   tabBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
       tabBtns.forEach((b) => b.classList.remove("active"));
@@ -45,6 +49,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // 2. Load & Sync State from Background
   chrome.runtime.sendMessage({ target: "background", type: "GET_STATE" }, (res) => {
     if (res) {
       appState = res;
@@ -52,9 +57,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Populate UI with loaded settings
   applySettingsToInputs(currentSettings);
   updateLivePreview(currentSettings);
 
+  // 3. Toggle Start / Stop Capture
   toggleBtn.addEventListener("click", async () => {
     if (appState.isCapturing) {
       chrome.runtime.sendMessage({ target: "background", type: "STOP_CAPTURE" }, () => {
@@ -86,6 +93,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // 4. Input Change Listeners
   langSelect.addEventListener("change", () => {
     currentSettings.language = langSelect.value;
     saveAndNotify();
@@ -106,6 +114,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     saveAndNotify();
   });
 
+  // 5. Offset Steppers
   offsetMinus.addEventListener("click", () => {
     currentSettings.offset = parseFloat((currentSettings.offset - 0.5).toFixed(1));
     updateOffsetDisplay();
@@ -129,14 +138,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     offsetDisplay.textContent = (val > 0 ? `+${val}s` : `${val}s`);
   }
 
+  // 6. Style Presets Selection
   presetBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
       const presetKey = btn.getAttribute("data-preset");
       presetBtns.forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
 
-      if (presetKey && PRESETS[presetKey]) {
-        currentSettings = { ...currentSettings, ...PRESETS[presetKey], preset: presetKey };
+      if (presetKey && (PRESETS as any)[presetKey]) {
+        currentSettings = { ...currentSettings, ...(PRESETS as any)[presetKey], preset: presetKey };
         applySettingsToInputs(currentSettings);
         updateLivePreview(currentSettings);
         saveAndNotify();
@@ -144,6 +154,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // 7. Custom Styling Sliders & Selects
   fontSizeSlider.addEventListener("input", () => {
     const size = parseInt(fontSizeSlider.value);
     fontSizeVal.textContent = `${size}px`;
@@ -213,7 +224,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     presetBtns.forEach((b) => b.classList.remove("active"));
   }
 
-  function applySettingsToInputs(settings) {
+  function applySettingsToInputs(settings: any) {
     langSelect.value = settings.language || "auto";
     modelSelect.value = settings.model || "base";
     wsUrlInput.value = settings.wsUrl || "ws://127.0.0.1:8000/ws/transcribe";
@@ -241,7 +252,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  function updateLivePreview(settings) {
+  function updateLivePreview(settings: any) {
     if (!previewCue) return;
     previewCue.style.fontSize = `${settings.fontSize * 0.75}px`;
     previewCue.style.color = settings.textColor || "#ffffff";
@@ -265,7 +276,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  function updateStatusUI(status, isCapturing) {
+  function updateStatusUI(status: string, isCapturing: boolean) {
     statusDot.className = `status-dot ${status}`;
     if (status === "connected" || isCapturing) {
       statusText.textContent = "Connected & Active";
@@ -305,7 +316,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 
-function hexToRgba(hex, opacity) {
+function hexToRgba(hex: string, opacity: number): string {
   let c = hex.replace("#", "");
   if (c.length === 3) c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2];
   const r = parseInt(c.substring(0, 2), 16) || 0;
