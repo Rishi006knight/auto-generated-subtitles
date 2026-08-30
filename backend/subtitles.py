@@ -1,20 +1,13 @@
 """
 Subtitle Engine
 Formats raw ASR transcription and word timestamps into human-readable,
-properly segmented subtitle cues with line wrapping, duration bounds, and CPS pacing.
+properly segmented subtitle cues with line wrapping, duration bounds, CPS pacing,
+and unique chunk identifiers.
 """
 from dataclasses import dataclass, field
 from typing import List, Optional
 import re
-
-
-@dataclass
-class SubtitleCue:
-    start: float
-    end: float
-    text: str
-    final: bool = True
-    confidence: float = 1.0
+import uuid
 
 
 @dataclass
@@ -23,6 +16,17 @@ class WordTimestamp:
     start: float
     end: float
     probability: float = 1.0
+
+
+@dataclass
+class SubtitleCue:
+    id: str
+    start: float
+    end: float
+    text: str
+    type: str = "final"  # 'partial' | 'final'
+    final: bool = True
+    confidence: float = 1.0
 
 
 class SubtitleEngine:
@@ -43,10 +47,6 @@ class SubtitleEngine:
         self.pause_split_threshold = pause_split_threshold
 
     def format_lines(self, text: str) -> str:
-        """
-        Wraps text into at most `max_lines` lines, respecting `max_line_length`
-        and splitting naturally on punctuation or spaces.
-        """
         text = text.strip()
         if not text or len(text) <= self.max_line_length:
             return text
@@ -56,20 +56,15 @@ class SubtitleEngine:
         current_line = []
         current_len = 0
 
-        # Punctuation preference regex
-        punct_pattern = re.compile(r"[,;:\.!?—–]$")
-
         for word in words:
             word_len = len(word)
             new_len = current_len + (1 if current_len > 0 else 0) + word_len
 
-            # Check if line length exceeded or punctuation break on max_lines-1
             if new_len > self.max_line_length and current_line:
                 lines.append(" ".join(current_line))
                 current_line = [word]
                 current_len = word_len
                 if len(lines) >= self.max_lines:
-                    # Append remaining words to the last line or stop
                     break
             else:
                 current_line.append(word)
@@ -78,22 +73,23 @@ class SubtitleEngine:
         if current_line and len(lines) < self.max_lines:
             lines.append(" ".join(current_line))
         elif current_line:
-            # Merge remaining into last line if needed
             lines[-1] = lines[-1] + " " + " ".join(current_line)
 
         return "\n".join(lines[: self.max_lines])
 
     def words_to_cues(
-        self, words: List[WordTimestamp], base_video_time: float = 0.0, is_final: bool = True
+        self,
+        words: List[WordTimestamp],
+        base_video_time: float = 0.0,
+        chunk_id: Optional[str] = None,
+        is_final: bool = True,
     ) -> List[SubtitleCue]:
-        """
-        Groups stream of word timestamps into optimal subtitle cues.
-        """
         if not words:
             return []
 
         cues: List[SubtitleCue] = []
         current_words: List[WordTimestamp] = []
+        assigned_id = chunk_id or f"chunk_{uuid.uuid4().hex[:8]}"
 
         def flush_cue(word_list: List[WordTimestamp], final_flag: bool):
             if not word_list:
@@ -106,19 +102,18 @@ class SubtitleEngine:
             cue_start = base_video_time + word_list[0].start
             cue_end = base_video_time + word_list[-1].end
 
-            # Ensure minimum & maximum duration bounds
             duration = max(self.min_duration, cue_end - cue_start)
             duration = min(self.max_duration, duration)
-
-            # Ensure reasonable CPS reading speed
             min_reading_duration = len(formatted_text) / self.max_cps
             duration = max(duration, min_reading_duration)
 
             cues.append(
                 SubtitleCue(
+                    id=assigned_id,
                     start=round(cue_start, 2),
                     end=round(cue_start + duration, 2),
                     text=formatted_text,
+                    type="final" if final_flag else "partial",
                     final=final_flag,
                     confidence=sum(w.probability for w in word_list) / len(word_list),
                 )
@@ -128,22 +123,17 @@ class SubtitleEngine:
             current_words.append(word)
             text_so_far = " ".join(w.word for w in current_words)
 
-            # Check for natural pauses between consecutive words
             pause = 0.0
             if i < len(words) - 1:
                 pause = words[i + 1].start - word.end
 
-            # Split conditions:
-            # 1. Significant pause
-            # 2. Reached max duration
-            # 3. Punctuation ending with long line
             cue_duration = word.end - current_words[0].start
             has_sentence_end = bool(re.search(r"[\.!?]$", word.word.strip()))
 
             if (
                 pause >= self.pause_split_threshold
                 or cue_duration >= self.max_duration
-                or (has_sentence_end and len(text_so_far) >= 30)
+                or (has_sentence_end and len(text_so_far) >= 28)
                 or len(text_so_far) >= (self.max_line_length * self.max_lines)
             ):
                 flush_cue(current_words, final_flag=is_final)
@@ -153,25 +143,3 @@ class SubtitleEngine:
             flush_cue(current_words, final_flag=is_final)
 
         return cues
-
-    def segment_to_cue(
-        self, text: str, start: float, end: float, base_video_time: float = 0.0, is_final: bool = True
-    ) -> SubtitleCue:
-        """
-        Creates a single formatted subtitle cue from segment-level transcription.
-        """
-        formatted_text = self.format_lines(text)
-        cue_start = base_video_time + start
-        cue_end = base_video_time + end
-
-        duration = max(self.min_duration, cue_end - cue_start)
-        duration = min(self.max_duration, duration)
-        min_reading_duration = len(formatted_text) / self.max_cps
-        duration = max(duration, min_reading_duration)
-
-        return SubtitleCue(
-            start=round(cue_start, 2),
-            end=round(cue_start + duration, 2),
-            text=formatted_text,
-            final=is_final,
-        )

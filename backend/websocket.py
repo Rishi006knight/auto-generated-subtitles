@@ -1,9 +1,10 @@
 """
-WebSocket Endpoint Handler
-Coordinates real-time streaming audio ingestion, VAD, ASR transcription,
-subtitle segmentation, and dispatching formatted cues back to the browser extension.
+Production Streaming WebSocket Endpoint
+Handles real-time binary audio streaming, VAD gating, chunk_id management,
+partial/final subtitle emission, and latency compensation.
 """
 import json
+import time
 import logging
 import asyncio
 import numpy as np
@@ -32,9 +33,8 @@ class StreamingASRHandler:
     async def handle_connection(self, websocket: WebSocket, session_id: str):
         await websocket.accept()
         session = self.session_manager.get_or_create(session_id)
-        logger.info(f"WebSocket client connected: session_id={session_id}")
+        logger.info(f"Client connected: session_id={session_id}")
 
-        # Send initial confirmation
         await websocket.send_json({
             "type": "connected",
             "session_id": session_id,
@@ -43,9 +43,9 @@ class StreamingASRHandler:
             "device": self.asr_engine.device,
         })
 
-        min_process_bytes = 16000 * 2 * 1.5  # 1.5s of 16kHz 16-bit PCM (48,000 bytes)
-        silence_flush_bytes = 16000 * 2 * 0.6 # 0.6s
-        last_process_time = asyncio.get_event_loop().time()
+        min_partial_bytes = 16000 * 2 * 1.5   # 1.5s
+        max_chunk_bytes = 16000 * 2 * 5.0     # 5.0s max chunk
+        last_partial_time = asyncio.get_event_loop().time()
 
         try:
             while True:
@@ -56,23 +56,45 @@ class StreamingASRHandler:
                     session.append_raw_pcm(raw_bytes)
 
                     now = asyncio.get_event_loop().time()
-                    time_since_last = now - last_process_time
-                    buffer_len = len(session.audio_buffer)
+                    time_since_partial = now - last_partial_time
+                    buf_len = len(session.audio_buffer)
 
-                    # Trigger transcription if buffer has accumulated >= 1.5s or > 0.8s elapsed with speech
-                    if buffer_len >= min_process_bytes or (buffer_len >= silence_flush_bytes and time_since_last > 1.2):
-                        await self._process_session_audio(websocket, session)
-                        last_process_time = now
+                    # Check for partial vs final emission
+                    if buf_len >= max_chunk_bytes:
+                        # Finalize chunk
+                        await self._process_session_audio(websocket, session, is_final=True)
+                        session.roll_buffer(keep_prefix_seconds=1.0)
+                        session.renew_chunk_id()
+                        last_partial_time = now
+                    elif buf_len >= min_partial_bytes and time_since_partial >= 1.2:
+                        # Partial update
+                        await self._process_session_audio(websocket, session, is_final=False)
+                        last_partial_time = now
 
                 elif "text" in message and message["text"]:
                     try:
                         data = json.loads(message["text"])
                         msg_type = data.get("type")
 
-                        if msg_type == "sync":
+                        if msg_type == "ping":
+                            client_time = data.get("client_time", 0)
+                            await websocket.send_json({
+                                "type": "pong",
+                                "client_time": client_time,
+                                "server_time": time.time() * 1000,
+                            })
+
+                        elif msg_type == "sync":
                             video_time = float(data.get("video_time", 0.0))
                             offset = float(data.get("offset", 0.0))
                             session.update_video_time(video_time, offset)
+
+                        elif msg_type == "silence_ping":
+                            # If we have residual audio when silence starts, flush it as final
+                            if len(session.audio_buffer) >= (16000 * 2 * 0.8):
+                                await self._process_session_audio(websocket, session, is_final=True)
+                                session.roll_buffer(keep_prefix_seconds=0.5)
+                                session.renew_chunk_id()
 
                         elif msg_type == "config":
                             lang = data.get("language")
@@ -84,7 +106,7 @@ class StreamingASRHandler:
                                 self.asr_engine.load_model(model_size)
                             if offset is not None:
                                 session.user_time_offset = float(offset)
-                            
+
                             await websocket.send_json({
                                 "type": "config_ack",
                                 "language": session.language,
@@ -94,62 +116,62 @@ class StreamingASRHandler:
 
                         elif msg_type == "flush":
                             if len(session.audio_buffer) > 0:
-                                await self._process_session_audio(websocket, session, force_final=True)
-                                session.clear_buffer(keep_last_seconds=0.0)
+                                await self._process_session_audio(websocket, session, is_final=True)
+                                session.roll_buffer(keep_prefix_seconds=0.0)
+                                session.renew_chunk_id()
 
                     except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON received from session {session_id}")
+                        logger.warning(f"Malformed JSON from session {session_id}")
 
         except WebSocketDisconnect:
-            logger.info(f"WebSocket client disconnected: session_id={session_id}")
+            logger.info(f"Client disconnected: session_id={session_id}")
         except Exception as e:
-            logger.error(f"Error in session {session_id}: {e}", exc_info=True)
+            logger.error(f"WebSocket session error ({session_id}): {e}", exc_info=True)
         finally:
             self.session_manager.remove_session(session_id)
 
     async def _process_session_audio(
-        self, websocket: WebSocket, session: TranscriptionSession, force_final: bool = False
+        self, websocket: WebSocket, session: TranscriptionSession, is_final: bool = False
     ):
-        audio_float32 = session.get_audio_float32(dtype_str="int16")
-        if len(audio_float32) < 3200:  # Less than 0.2s
+        audio_float32 = session.get_full_audio_float32(include_prefix=True)
+        if len(audio_float32) < 4000:
             return
 
-        # 1. Voice Activity Detection
+        # 1. Server-side VAD filtering
         speech_intervals = self.vad.get_speech_timestamps(audio_float32)
         if not speech_intervals:
-            # Silence detected - discard silence and prevent Whisper hallucination
-            session.clear_buffer(keep_last_seconds=0.2)
             return
 
-        # 2. Run Whisper ASR
+        # 2. Thread-safe Whisper ASR
         base_video_time = session.get_current_video_base_time()
-        words, full_text, detected_lang = await asyncio.to_thread(
-            self.asr_engine.transcribe_chunk,
+        words, full_text, detected_lang = await self.asr_engine.transcribe_chunk_async(
             audio_float32,
             language=session.language,
         )
 
         if not full_text.strip():
-            session.clear_buffer(keep_last_seconds=0.3)
             return
 
-        # 3. Format Subtitles using SubtitleEngine
+        # 3. Format Subtitles
         cues = self.subtitle_engine.words_to_cues(
             words,
             base_video_time=base_video_time,
-            is_final=force_final or len(words) > 5,
+            chunk_id=session.current_chunk_id,
+            is_final=is_final,
         )
 
-        # 4. Dispatch Subtitle packets to Chrome Extension
+        # 4. Dispatch Subtitle packets
         for cue in cues:
             await websocket.send_json({
                 "type": "subtitle",
+                "id": cue.id,
                 "start": cue.start,
                 "end": cue.end,
                 "text": cue.text,
+                "type": cue.type,
                 "final": cue.final,
                 "language": detected_lang,
                 "confidence": round(cue.confidence, 2),
+                "server_timestamp": time.time(),
+                "client_video_time": base_video_time,
             })
-
-        session.clear_buffer(keep_last_seconds=0.4)
