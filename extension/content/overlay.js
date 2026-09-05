@@ -1,12 +1,11 @@
 /**
  * Subtitle AI - Content Overlay Engine
  * 
- * Production Features:
- * - Fullscreen Trap Solution: Reparents into document.fullscreenElement on fullscreenchange
- * - Chunk-ID in-place update: Seamlessly replaces partial text with final text without reflow flicker
- * - Anti-Flicker Partial Buffering: 120ms debounce for high-frequency partial updates
- * - Smart Auto-Pause Toast: Visual feedback ("Syncing subtitles...") when backend buffers catch up
- * - Dynamic Styles & Presets: Real-time synchronization with user customization
+ * Features:
+ * - Direct, rock-solid bottom positioning over any video player
+ * - Fullscreen reparenting for YouTube, Netflix, Twitch, etc.
+ * - Dynamic live style & placement updates from popup
+ * - Natural subtitle pacing
  */
 
 class SubtitleOverlayManager {
@@ -19,10 +18,6 @@ class SubtitleOverlayManager {
     this.hideTimeout = null;
     this.activeChunkId = null;
 
-    // Anti-Flicker Buffer
-    this.pendingPartialText = null;
-    this.partialDebounceTimer = null;
-
     this.init();
   }
 
@@ -34,6 +29,10 @@ class SubtitleOverlayManager {
     // Fullscreen listeners
     document.addEventListener("fullscreenchange", () => this.handleFullscreenChange());
     document.addEventListener("webkitfullscreenchange", () => this.handleFullscreenChange());
+
+    // Scroll & Layout tracking
+    window.addEventListener("scroll", () => this.reposition(), { passive: true });
+    window.addEventListener("resize", () => this.reposition(), { passive: true });
 
     // Message listeners
     chrome.runtime.onMessage.addListener((message) => {
@@ -58,6 +57,13 @@ class SubtitleOverlayManager {
         this.applySettings(changes.subtitleSettings.newValue);
       }
     });
+
+    // Continuous soft position tracking
+    setInterval(() => {
+      if (this.targetVideo && !document.fullscreenElement) {
+        this.reposition();
+      }
+    }, 800);
   }
 
   createElements() {
@@ -108,51 +114,35 @@ class SubtitleOverlayManager {
     if (fullscreenEl) return;
 
     const rect = this.targetVideo.getBoundingClientRect();
-    const scrollX = window.scrollX || window.pageXOffset;
-    const scrollY = window.scrollY || window.pageYOffset;
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const scrollX = window.scrollX || window.pageXOffset || 0;
+    const scrollY = window.scrollY || window.pageYOffset || 0;
 
     this.container.style.position = "absolute";
-    this.container.style.top = `${rect.top + scrollY}px`;
-    this.container.style.left = `${rect.left + scrollX}px`;
-    this.container.style.width = `${rect.width}px`;
-    this.container.style.height = `${rect.height}px`;
+    this.container.style.top = `${Math.round(rect.top + scrollY)}px`;
+    this.container.style.left = `${Math.round(rect.left + scrollX)}px`;
+    this.container.style.width = `${Math.round(rect.width)}px`;
+    this.container.style.height = `${Math.round(rect.height)}px`;
     this.container.style.zIndex = "2147483647";
   }
 
   handleIncomingCue(cue) {
     if (!this.cueBox || !cue.text) return;
 
-    const isFinal = cue.type === "final" || cue.final === true;
     const chunkId = cue.id || "default";
+    this.activeChunkId = chunkId;
 
-    if (isFinal) {
-      if (this.partialDebounceTimer) {
-        clearTimeout(this.partialDebounceTimer);
-        this.partialDebounceTimer = null;
+    this.renderText(cue.text, false);
+
+    if (this.hideTimeout) clearTimeout(this.hideTimeout);
+    const calculatedDuration = Math.max(3.8, (cue.end - cue.start) || 4.0);
+
+    this.hideTimeout = setTimeout(() => {
+      if (this.activeChunkId === chunkId) {
+        this.clear();
       }
-      this.activeChunkId = chunkId;
-      this.renderText(cue.text, false);
-
-      if (this.hideTimeout) clearTimeout(this.hideTimeout);
-      const displayDurationSec = Math.max(1.5, (cue.end - cue.start) || 3.5);
-      this.hideTimeout = setTimeout(() => {
-        if (this.activeChunkId === chunkId) {
-          this.clear();
-        }
-      }, displayDurationSec * 1000);
-    } else {
-      this.activeChunkId = chunkId;
-      this.pendingPartialText = cue.text;
-
-      if (!this.partialDebounceTimer) {
-        this.partialDebounceTimer = setTimeout(() => {
-          if (this.pendingPartialText) {
-            this.renderText(this.pendingPartialText, true);
-          }
-          this.partialDebounceTimer = null;
-        }, 120);
-      }
-    }
+    }, calculatedDuration * 1000);
   }
 
   renderText(text, isPartial) {
@@ -197,10 +187,6 @@ class SubtitleOverlayManager {
       clearTimeout(this.hideTimeout);
       this.hideTimeout = null;
     }
-    if (this.partialDebounceTimer) {
-      clearTimeout(this.partialDebounceTimer);
-      this.partialDebounceTimer = null;
-    }
     this.activeChunkId = null;
   }
 
@@ -208,7 +194,27 @@ class SubtitleOverlayManager {
     if (!settings || !this.cueBox || !this.container) return;
     this.currentSettings = settings;
 
-    this.container.className = `position-${settings.position || "bottom"}`;
+    const pos = settings.position || "bottom";
+    this.container.className = `position-${pos}`;
+
+    // Directly set flex alignment based on position
+    if (pos === "bottom") {
+      this.container.style.setProperty("justify-content", "flex-end", "important");
+      this.container.style.setProperty("padding-bottom", "32px", "important");
+      this.container.style.setProperty("padding-top", "0px", "important");
+    } else if (pos === "above-bottom") {
+      this.container.style.setProperty("justify-content", "flex-end", "important");
+      this.container.style.setProperty("padding-bottom", "76px", "important");
+      this.container.style.setProperty("padding-top", "0px", "important");
+    } else if (pos === "center") {
+      this.container.style.setProperty("justify-content", "center", "important");
+      this.container.style.setProperty("padding-bottom", "0px", "important");
+      this.container.style.setProperty("padding-top", "0px", "important");
+    } else if (pos === "top") {
+      this.container.style.setProperty("justify-content", "flex-start", "important");
+      this.container.style.setProperty("padding-top", "32px", "important");
+      this.container.style.setProperty("padding-bottom", "0px", "important");
+    }
 
     const fontSize = settings.fontSize || 22;
     this.cueBox.style.fontSize = `${fontSize}px`;
@@ -250,4 +256,7 @@ class SubtitleOverlayManager {
   }
 }
 
-window.subtitleOverlay = new SubtitleOverlayManager();
+// Instantiate globally on content script load
+if (typeof window !== "undefined") {
+  window.subtitleOverlay = new SubtitleOverlayManager();
+}

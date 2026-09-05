@@ -1,14 +1,5 @@
 /**
  * Subtitle AI - Offscreen Audio Capture & Streaming Engine
- * 
- * Capabilities:
- * - Tab audio capture via chrome.tabCapture streamId
- * - Loopback audio routing to preserve speaker output for the user
- * - High-speed downsampling to 16kHz mono 16-bit PCM
- * - Client-side VAD energy gating to prevent sending silent audio
- * - Ping/Pong heartbeat for dynamic RTT latency calculation
- * - Smart Auto-Pause Control message routing (lag_warning, lag_clear)
- * - Chunk-ID aware subtitle message dispatching to active tab
  */
 
 let audioContext = null;
@@ -23,11 +14,11 @@ let isSpeechActive = false;
 let silenceFramesCount = 0;
 let lastSilencePingTime = 0;
 let lastPingTime = 0;
-let currentEstimatedRttMs = 50;
+let currentEstimatedRttMs = 30;
 
-// Pre-roll hangover buffer (keeps ~200ms audio prior to speech onset)
+// Pre-roll buffer (keeps ~160ms audio prior to speech onset)
 const prerollChunks = [];
-const MAX_PREROLL_CHUNKS = 3;
+const MAX_PREROLL_CHUNKS = 4;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.target !== "offscreen") return;
@@ -101,7 +92,7 @@ async function startCapture(payload) {
     socket?.send(JSON.stringify({
       type: "config",
       language: language || "auto",
-      model: model || "base",
+      model: model || "tiny",
       offset: offset || 0.0,
     }));
     notifyStatus("connected");
@@ -112,13 +103,12 @@ async function startCapture(payload) {
     try {
       const data = JSON.parse(event.data);
 
-      // Handle Smart Auto-Pause Control Messages from Backend
       if (data.type === "control") {
         chrome.runtime.sendMessage({
           target: "content",
           tabId: targetTabId,
           type: "CONTROL_ACTION",
-          action: data.action, // 'lag_warning' or 'lag_clear'
+          action: data.action,
           queue_size: data.queue_size,
         });
         return;
@@ -153,8 +143,8 @@ async function startCapture(payload) {
     notifyStatus("idle");
   };
 
-  // 4. Setup Audio Downsampling & Client-side VAD
-  const bufferSize = 4096;
+  // 4. Low-latency 2048 buffer size (~40ms frames)
+  const bufferSize = 2048;
   scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
   const nativeSampleRate = audioContext.sampleRate;
   const targetSampleRate = 16000;
@@ -165,13 +155,13 @@ async function startCapture(payload) {
     const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
     const resampledData = resampleTo16k(inputData, nativeSampleRate, targetSampleRate);
 
-    // Client-side RMS Energy calculation
+    // Fast RMS Energy calculation
     let sumSquares = 0;
     for (let i = 0; i < resampledData.length; i++) {
       sumSquares += resampledData[i] * resampledData[i];
     }
     const rmsEnergy = Math.sqrt(sumSquares / resampledData.length);
-    const speechThreshold = 0.008;
+    const speechThreshold = 0.0055;
 
     const pcm16Data = convertFloat32ToInt16(resampledData);
 
@@ -192,13 +182,13 @@ async function startCapture(payload) {
         prerollChunks.shift();
       }
 
-      if (isSpeechActive && silenceFramesCount < 5) {
+      if (isSpeechActive && silenceFramesCount < 6) {
         socket.send(pcm16Data.buffer);
-      } else if (isSpeechActive && silenceFramesCount >= 5) {
+      } else if (isSpeechActive && silenceFramesCount >= 6) {
         isSpeechActive = false;
       } else {
         const now = performance.now();
-        if (now - lastSilencePingTime > 2500) {
+        if (now - lastSilencePingTime > 2000) {
           lastSilencePingTime = now;
           socket.send(JSON.stringify({ type: "silence_ping", client_time: now }));
         }
@@ -219,7 +209,7 @@ function startHeartbeatPing() {
     const now = performance.now();
     lastPingTime = now;
     socket.send(JSON.stringify({ type: "ping", client_time: now }));
-  }, 3000);
+  }, 2500);
 }
 
 function resampleTo16k(audioBuffer, sourceRate, targetRate) {

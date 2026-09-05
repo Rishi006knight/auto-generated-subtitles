@@ -1,5 +1,5 @@
 /**
- * Subtitle AI - Popup Controller (with Live Health Check & Clear Error Reporting)
+ * Subtitle AI - Popup Controller (with Live Health Check & Real-time Live Settings Sync)
  */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -156,13 +156,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   offsetMinus.addEventListener("click", () => {
-    currentSettings.offset = parseFloat((currentSettings.offset - 0.5).toFixed(1));
+    currentSettings.offset = parseFloat((currentSettings.offset - 0.2).toFixed(1));
     updateOffsetDisplay();
     saveAndNotify();
   });
 
   offsetPlus.addEventListener("click", () => {
-    currentSettings.offset = parseFloat((currentSettings.offset + 0.5).toFixed(1));
+    currentSettings.offset = parseFloat((currentSettings.offset + 0.2).toFixed(1));
     updateOffsetDisplay();
     saveAndNotify();
   });
@@ -247,6 +247,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   positionSelect.addEventListener("change", () => {
     currentSettings.position = positionSelect.value;
+    currentSettings.preset = "custom";
+    highlightCustomPreset();
     saveAndNotify();
   });
 
@@ -264,7 +266,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function applySettingsToInputs(settings) {
     langSelect.value = settings.language || "auto";
-    modelSelect.value = settings.model || "base";
+    modelSelect.value = settings.model || "tiny";
     wsUrlInput.value = settings.wsUrl || "ws://127.0.0.1:8000/ws/transcribe";
     autoPauseToggle.checked = settings.autoPauseEnabled ?? true;
     updateOffsetDisplay();
@@ -347,6 +349,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function saveAndNotify() {
     await saveStoredSettings(currentSettings);
 
+    // Notify offscreen document
     chrome.runtime.sendMessage({
       target: "offscreen",
       type: "UPDATE_CONFIG",
@@ -356,6 +359,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         offset: currentSettings.offset,
       },
     }).catch(() => {});
+
+    // Notify active content scripts immediately
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs && tabs[0]?.id) {
+        chrome.tabs.sendMessage(tabs[0].id, {
+          target: "content",
+          type: "UPDATE_SETTINGS",
+          payload: currentSettings,
+        }).catch(() => {});
+      }
+    });
   }
 });
 

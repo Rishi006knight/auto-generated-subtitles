@@ -1,10 +1,6 @@
 """
-Production Low-Latency WebSocket Handler
-Features:
-- Real-time sliding window processing (1.2s - 2.0s chunks)
-- Deduplication filter to prevent repeating identical subtitle cues
-- Zero CPU lag accumulation
-- Clean connection lifecycle
+Production Streaming WebSocket Handler
+Zero-lag streaming architecture with rapid bounded windowing and graceful disconnection handling.
 """
 import json
 import time
@@ -22,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SessionQueueState:
-    def __init__(self, maxsize: int = 15):
+    def __init__(self, maxsize: int = 25):
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self.is_connected: bool = True
         self.worker_task: asyncio.Task = None
@@ -45,7 +41,7 @@ class StreamingASRHandler:
     async def handle_connection(self, websocket: WebSocket, session_id: str):
         await websocket.accept()
         session = self.session_manager.get_or_create(session_id)
-        queue_state = SessionQueueState(maxsize=15)
+        queue_state = SessionQueueState(maxsize=25)
         self.queue_states[session_id] = queue_state
 
         logger.info(f"Client connected: session_id={session_id}")
@@ -72,7 +68,6 @@ class StreamingASRHandler:
 
                 if "bytes" in message and message["bytes"]:
                     raw_bytes = message["bytes"]
-                    # If queue is saturated, discard oldest to keep strictly real-time
                     if queue_state.queue.full():
                         try:
                             _ = queue_state.queue.get_nowait()
@@ -100,10 +95,7 @@ class StreamingASRHandler:
                             session.update_video_time(video_time, offset)
 
                         elif msg_type == "silence_ping":
-                            # Flush buffer on silence to finalize sentence
-                            if len(session.audio_buffer) >= (16000 * 2 * 0.8):
-                                await self._process_session_audio(websocket, session, queue_state, is_final=True)
-                            session.clear_buffer(keep_tail_seconds=0.0)
+                            session.clear_buffer()
 
                         elif msg_type == "config":
                             lang = data.get("language")
@@ -125,17 +117,15 @@ class StreamingASRHandler:
                                 })
 
                         elif msg_type == "flush":
-                            if len(session.audio_buffer) > 0:
-                                await self._process_session_audio(websocket, session, queue_state, is_final=True)
-                                session.clear_buffer(keep_tail_seconds=0.0)
+                            session.clear_buffer()
 
                     except json.JSONDecodeError:
                         pass
 
         except (WebSocketDisconnect, RuntimeError):
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Connection loop terminated: {e}")
         finally:
             queue_state.is_connected = False
             if queue_state.worker_task:
@@ -148,63 +138,45 @@ class StreamingASRHandler:
     async def _asr_worker_loop(
         self, websocket: WebSocket, session: TranscriptionSession, queue_state: SessionQueueState
     ):
-        """Worker task processing audio chunks in real-time."""
-        min_process_bytes = 16000 * 2 * 1.0   # 1.0s of audio
-        max_chunk_bytes = 16000 * 2 * 2.2     # 2.2s max window (Prevents CPU lag!)
-        last_process_time = asyncio.get_event_loop().time()
-
+        """Worker task processing audio chunks in fast, responsive windows."""
         while queue_state.is_connected:
             try:
-                # 1. Get first chunk
-                first_chunk = await queue_state.queue.get()
-                session.append_raw_pcm(first_chunk)
+                chunk = await queue_state.queue.get()
+                session.append_raw_pcm(chunk)
                 queue_state.queue.task_done()
 
-                # 2. Coalesce all available chunks in the queue
+                # Drain immediate pending packets into buffer
                 while not queue_state.queue.empty():
-                    extra_chunk = queue_state.queue.get_nowait()
-                    session.append_raw_pcm(extra_chunk)
+                    extra = queue_state.queue.get_nowait()
+                    session.append_raw_pcm(extra)
                     queue_state.queue.task_done()
 
-                now = asyncio.get_event_loop().time()
-                buf_len = len(session.audio_buffer)
-                elapsed_since = now - last_process_time
-
-                # 3. Transcribe if window reached
-                if buf_len >= max_chunk_bytes:
-                    await self._process_session_audio(websocket, session, queue_state, is_final=True)
-                    session.clear_buffer(keep_tail_seconds=0.2)
-                    session.renew_chunk_id()
-                    last_process_time = now
-                elif buf_len >= min_process_bytes and elapsed_since >= 0.8:
-                    await self._process_session_audio(websocket, session, queue_state, is_final=False)
-                    last_process_time = now
+                # Extract rapid audio slice (0.6s - 1.3s max)
+                audio_slice = session.extract_slice_for_asr(max_duration_sec=1.3, min_duration_sec=0.6, keep_tail_sec=0.2)
+                if audio_slice is not None and len(audio_slice) >= 9600: # ~0.6s+
+                    await self._process_slice(websocket, session, queue_state, audio_slice)
 
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as e:
                 if not queue_state.is_connected:
                     break
-                await asyncio.sleep(0.05)
+                logger.debug(f"Worker iteration exception: {e}")
+                await asyncio.sleep(0.02)
 
-    async def _process_session_audio(
+    async def _process_slice(
         self,
         websocket: WebSocket,
         session: TranscriptionSession,
         queue_state: SessionQueueState,
-        is_final: bool = False,
+        audio_float32: np.ndarray,
     ):
         if not queue_state.is_connected or websocket.client_state != WebSocketState.CONNECTED:
             return
 
-        audio_float32 = session.get_audio_float32()
-        if len(audio_float32) < 3200:
-            return
-
-        # 1. Voice Activity Detection
+        # 1. VAD Check
         speech_intervals = self.vad.get_speech_timestamps(audio_float32)
         if not speech_intervals:
-            session.clear_buffer(keep_tail_seconds=0.0)
             return
 
         # 2. Fast Whisper ASR
@@ -218,17 +190,18 @@ class StreamingASRHandler:
         if not clean_text:
             return
 
-        # Anti-Duplication: Skip if this exact text was just emitted in the previous slice
-        if clean_text == session.last_transcribed_text and not is_final:
+        # Deduplication check
+        if clean_text == session.last_transcribed_text:
             return
         session.last_transcribed_text = clean_text
 
         # 3. Format Subtitle Cues
+        session.renew_chunk_id()
         cues = self.subtitle_engine.words_to_cues(
             words,
             base_video_time=base_video_time,
             chunk_id=session.current_chunk_id,
-            is_final=is_final,
+            is_final=True,
         )
 
         if not queue_state.is_connected or websocket.client_state != WebSocketState.CONNECTED:
@@ -250,5 +223,4 @@ class StreamingASRHandler:
                     "client_video_time": base_video_time,
                 })
             except Exception:
-                queue_state.is_connected = False
                 break

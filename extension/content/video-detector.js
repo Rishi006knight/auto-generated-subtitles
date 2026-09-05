@@ -1,10 +1,5 @@
 /**
  * Subtitle AI - Video Detector & Auto-Pause Synchronizer
- * 
- * Features:
- * - Real-time HTML5 video player detection and bounding
- * - Smart Auto-Pause state machine with user override detection
- * - Time sync and latency offset coordination
  */
 
 class VideoDetector {
@@ -32,8 +27,8 @@ class VideoDetector {
     observer.observe(document.body, { childList: true, subtree: true });
 
     // Handle window resize and fullscreen events
-    window.addEventListener("resize", () => this.onLayoutChange());
-    window.addEventListener("scroll", () => this.onLayoutChange());
+    window.addEventListener("resize", () => this.onLayoutChange(), { passive: true });
+    window.addEventListener("scroll", () => this.onLayoutChange(), { passive: true });
     document.addEventListener("fullscreenchange", () => this.onLayoutChange());
 
     // Listen for Smart Auto-Pause Control Messages from offscreen document

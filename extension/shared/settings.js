@@ -76,7 +76,7 @@ const DEFAULT_SETTINGS = {
   borderRadius: 6,
   offset: 0.0,
   language: "auto",
-  model: "base",
+  model: "tiny",
   autoPauseEnabled: true,
   wsUrl: "ws://127.0.0.1:8000/ws/transcribe",
 };

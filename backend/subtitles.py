@@ -4,7 +4,7 @@ Formats raw ASR transcription and word timestamps into human-readable,
 properly segmented subtitle cues with line wrapping, duration bounds, CPS pacing,
 and unique chunk identifiers.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 import re
 import uuid
@@ -34,7 +34,7 @@ class SubtitleEngine:
         self,
         max_lines: int = 2,
         max_line_length: int = 42,
-        min_duration: float = 1.0,
+        min_duration: float = 1.5,
         max_duration: float = 6.0,
         max_cps: float = 21.0,
         pause_split_threshold: float = 0.8,

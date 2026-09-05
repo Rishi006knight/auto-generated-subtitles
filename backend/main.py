@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
         max_cps=21.0,
     )
     vad_wrapper = SileroVADWrapper(sample_rate=16000)
-    asr_engine = ASREngine(default_model_size="base", device="auto")
+    asr_engine = ASREngine(default_model_size="auto", device="auto")
     session_manager = SessionManager()
     stream_handler = StreamingASRHandler(
         session_manager=session_manager,

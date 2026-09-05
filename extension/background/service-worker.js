@@ -88,7 +88,7 @@ async function handleStartCapture(options) {
       sessionId,
       wsUrl: options.wsUrl || "ws://127.0.0.1:8000/ws/transcribe",
       language: options.language || "auto",
-      model: options.model || "base",
+      model: options.model || "tiny",
       offset: options.offset || 0.0,
     },
   });

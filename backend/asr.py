@@ -1,5 +1,6 @@
 """
-Production High-Speed ASR Engine with Anti-Hallucination & Anti-Lag Defenses
+High-Speed Streaming ASR Engine
+Optimized for ultra-fast, low-latency CPU inference with instant startup.
 """
 import os
 import numpy as np
@@ -21,25 +22,31 @@ HALLUCINATION_PATTERNS = [
     re.compile(r"like\s+and\s+subscribe", re.IGNORECASE),
     re.compile(r"watch\s+more\s+videos", re.IGNORECASE),
     re.compile(r"see\s+you\s+in\s+the\s+next\s+video", re.IGNORECASE),
-    re.compile(r"(\b\w+\b)(?:\s+\1){2,}", re.IGNORECASE), # 3+ consecutive identical words (looping)
+    re.compile(r"(\b\w+\b)(?:\s+\1){2,}", re.IGNORECASE),  # 3+ consecutive identical words (looping)
 ]
 
 
 class ASREngine:
     def __init__(
         self,
-        default_model_size: str = "base.en",
+        default_model_size: str = "auto",
         device: str = "auto",
         compute_type: str = "default",
     ):
         self.device = device
         self.compute_type = compute_type
-        self.current_model_size = default_model_size
-        self.model = None
         self.num_threads = min(8, max(4, os.cpu_count() or 4))
         self._lock = asyncio.Lock()
+        self.model = None
+
         self._detect_hardware()
-        self.load_model(default_model_size)
+
+        if default_model_size == "auto":
+            self.current_model_size = "tiny" if self.device == "cpu" else "base"
+        else:
+            self.current_model_size = default_model_size
+
+        self.load_model(self.current_model_size)
 
     def _detect_hardware(self):
         if self.device == "auto":
@@ -73,14 +80,22 @@ class ASREngine:
                 cpu_threads=self.num_threads,
             )
             self.current_model_size = model_size
-            logger.info(f"Model '{model_size}' loaded successfully.")
+
+            # Pre-warm model to eliminate initial transcription delay
+            dummy_audio = np.zeros(8000, dtype=np.float32)
+            try:
+                _ = list(self.model.transcribe(dummy_audio, beam_size=1, word_timestamps=False)[0])
+            except Exception:
+                pass
+
+            logger.info(f"Model '{model_size}' ready and warm for real-time streaming.")
         except Exception as e:
-            logger.warning(f"Failed to load '{model_size}' on {self.device}: {e}. Falling back to 'base' on CPU int8.")
+            logger.warning(f"Failed to load '{model_size}' on {self.device}: {e}. Falling back to 'tiny' on CPU int8.")
             self.device = "cpu"
             self.compute_type = "int8"
             from faster_whisper import WhisperModel
-            self.model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=self.num_threads)
-            self.current_model_size = "base"
+            self.model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=self.num_threads)
+            self.current_model_size = "tiny"
 
     async def transcribe_chunk_async(
         self,
@@ -107,7 +122,6 @@ class ASREngine:
 
         lang_arg = None if (not language or language.lower() in ("auto", "none")) else language
 
-        # If model is .en (English-only), omit language arg
         if self.current_model_size.endswith(".en"):
             lang_arg = "en"
 
@@ -117,14 +131,14 @@ class ASREngine:
                 language=lang_arg,
                 task=task,
                 beam_size=1,                         # 3x faster than beam_size=5
-                best_of=1,                           # single candidate for lowest latency
-                temperature=0.0,                     # deterministic decoding (no sampling noise)
-                condition_on_previous_text=False,    # CRITICAL: Prevents hallucination feedback loops
+                best_of=1,                           # single candidate for ultra-low latency
+                temperature=0.0,                     # deterministic fast decoding
+                condition_on_previous_text=False,    # Prevents hallucination feedback loops
                 no_speech_threshold=0.5,             # Strictly drops silence
                 compression_ratio_threshold=2.2,     # Drops repetitive text loops
                 log_prob_threshold=-1.0,             # Drops low-confidence hallucinations
                 word_timestamps=True,
-                vad_filter=False,                    # External VAD handled upstream
+                vad_filter=False,                    # Handled upstream
             )
 
             detected_lang = getattr(info, "language", language or "en")
@@ -132,15 +146,12 @@ class ASREngine:
             valid_text_parts = []
 
             for segment in segments:
-                # 1. Reject high no_speech probability
                 if getattr(segment, "no_speech_prob", 0.0) > 0.5:
                     continue
 
-                # 2. Reject low average log-probability
                 if getattr(segment, "avg_logprob", 0.0) < -1.0:
                     continue
 
-                # 3. Reject high compression ratio (hallucinatory repetition)
                 if getattr(segment, "compression_ratio", 1.0) > 2.2:
                     continue
 
@@ -148,7 +159,6 @@ class ASREngine:
                 if not clean_seg_text:
                     continue
 
-                # 4. Reject known hallucination regexes
                 if any(pat.search(clean_seg_text) for pat in HALLUCINATION_PATTERNS):
                     continue
 
@@ -156,7 +166,7 @@ class ASREngine:
 
                 if segment.words:
                     for w in segment.words:
-                        if getattr(w, "probability", 1.0) >= 0.25:
+                        if getattr(w, "probability", 1.0) >= 0.15:
                             words.append(
                                 WordTimestamp(
                                     word=w.word,

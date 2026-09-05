@@ -1,13 +1,12 @@
 """
-Production Real-Time Sliding Window Session Manager
-Eliminates hallucination loops and buffer growth by capping audio windows to 2.0s max.
+Sliding Window Session Manager
+Ultra low-latency audio slicing (~0.6s - 1.3s) for near-instant speech subtitle generation.
 """
 import time
 import uuid
 import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from subtitles import SubtitleCue
 
 
 @dataclass
@@ -15,13 +14,13 @@ class TranscriptionSession:
     session_id: str
     sample_rate: int = 16000
     language: Optional[str] = "auto"
-    model_size: str = "base"
+    model_size: str = "tiny"
 
-    # Strict sliding window buffer (capped at 2.5 seconds = 80,000 bytes for 16-bit 16kHz PCM)
+    # Audio buffer: 16-bit mono 16kHz PCM (32,000 bytes per second)
     audio_buffer: bytearray = field(default_factory=bytearray)
-    max_buffer_bytes: int = 16000 * 2 * 2.5  # 2.5s max window
+    max_buffer_bytes: int = 16000 * 2 * 2  # Max 2.0 seconds hard ceiling
 
-    # Chunk Tracking
+    # Chunk & Subtitle Tracking
     current_chunk_id: str = field(default_factory=lambda: f"chunk_{uuid.uuid4().hex[:8]}")
     last_transcribed_text: str = ""
 
@@ -29,7 +28,7 @@ class TranscriptionSession:
     last_known_video_time: float = 0.0
     last_sync_timestamp: float = field(default_factory=time.time)
     user_time_offset: float = 0.0
-    estimated_rtt_ms: float = 50.0
+    estimated_rtt_ms: float = 30.0
 
     def renew_chunk_id(self) -> str:
         self.current_chunk_id = f"chunk_{uuid.uuid4().hex[:8]}"
@@ -42,26 +41,37 @@ class TranscriptionSession:
 
     def append_raw_pcm(self, pcm_bytes: bytes):
         self.audio_buffer.extend(pcm_bytes)
-        # Prevent buffer growth: retain only the latest 2.5 seconds
         if len(self.audio_buffer) > self.max_buffer_bytes:
             excess = len(self.audio_buffer) - self.max_buffer_bytes
             self.audio_buffer = bytearray(self.audio_buffer[excess:])
 
-    def get_audio_float32(self) -> np.ndarray:
-        """Converts accumulated buffer into normalized float32 ndarray."""
-        if not self.audio_buffer:
-            return np.array([], dtype=np.float32)
+    def extract_slice_for_asr(
+        self,
+        max_duration_sec: float = 1.3,
+        min_duration_sec: float = 0.6,
+        keep_tail_sec: float = 0.2,
+    ) -> Optional[np.ndarray]:
+        """
+        Extracts rapid 0.6s - 1.3s slices for high-speed streaming transcription.
+        """
+        min_bytes = int(16000 * 2 * min_duration_sec)
+        if len(self.audio_buffer) < min_bytes:
+            return None
 
-        int16_data = np.frombuffer(self.audio_buffer, dtype=np.int16)
+        slice_bytes = min(len(self.audio_buffer), int(16000 * 2 * max_duration_sec))
+        raw_slice = bytes(self.audio_buffer[:slice_bytes])
+
+        keep_bytes = int(keep_tail_sec * 16000 * 2)
+        if len(self.audio_buffer) > slice_bytes:
+            self.audio_buffer = bytearray(self.audio_buffer[slice_bytes - keep_bytes :])
+        else:
+            self.audio_buffer = bytearray(self.audio_buffer[-keep_bytes:])
+
+        int16_data = np.frombuffer(raw_slice, dtype=np.int16)
         return int16_data.astype(np.float32) / 32768.0
 
-    def clear_buffer(self, keep_tail_seconds: float = 0.3):
-        """Discards processed audio while keeping a tiny 300ms tail for boundary smoothness."""
-        keep_bytes = int(keep_tail_seconds * self.sample_rate * 2)
-        if len(self.audio_buffer) > keep_bytes:
-            self.audio_buffer = bytearray(self.audio_buffer[-keep_bytes:])
-        else:
-            self.audio_buffer.clear()
+    def clear_buffer(self):
+        self.audio_buffer.clear()
 
     def get_current_video_base_time(self) -> float:
         elapsed = time.time() - self.last_sync_timestamp
