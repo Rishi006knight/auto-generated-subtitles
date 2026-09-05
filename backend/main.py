@@ -4,7 +4,8 @@ Entry point for Real-Time Streaming Subtitle Generator Backend.
 """
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, Query
+from typing import Optional
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -20,19 +21,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("subtitle-backend")
 
-# Global instances
-asr_engine: ASREngine = None
-vad_wrapper: SileroVADWrapper = None
-subtitle_engine: SubtitleEngine = None
-session_manager: SessionManager = None
-stream_handler: StreamingASRHandler = None
+# Global service singletons
+asr_engine: Optional[ASREngine] = None
+vad_wrapper: Optional[SileroVADWrapper] = None
+subtitle_engine: Optional[SubtitleEngine] = None
+session_manager: Optional[SessionManager] = None
+stream_handler: Optional[StreamingASRHandler] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global asr_engine, vad_wrapper, subtitle_engine, session_manager, stream_handler
     logger.info("Initializing Subtitle AI Backend Services...")
-    
+
     subtitle_engine = SubtitleEngine(
         max_lines=2,
         max_line_length=42,
@@ -72,7 +73,7 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     return JSONResponse({
-        "status": "healthy",
+        "status": "healthy" if asr_engine and asr_engine.model else "initializing",
         "model": asr_engine.current_model_size if asr_engine else "uninitialized",
         "device": asr_engine.device if asr_engine else "unknown",
         "active_sessions": session_manager.count() if session_manager else 0,
@@ -81,6 +82,9 @@ async def health_check():
 
 @app.websocket("/ws/transcribe/{session_id}")
 async def websocket_transcribe(websocket: WebSocket, session_id: str):
+    if stream_handler is None:
+        await websocket.close(code=1013, reason="Backend initializing")
+        return
     await stream_handler.handle_connection(websocket, session_id)
 
 

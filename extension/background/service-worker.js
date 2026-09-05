@@ -40,12 +40,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  // Handle messages from Offscreen audio capture
-  if (message.target === "content" && message.type === "SUBTITLE_CUE") {
-    if (message.tabId) {
-      chrome.tabs.sendMessage(message.tabId, message).catch(() => {});
-    } else if (state.activeTabId) {
-      chrome.tabs.sendMessage(state.activeTabId, message).catch(() => {});
+  // Handle messages from Offscreen audio capture to Content Script (SUBTITLE_CUE, CONTROL_ACTION, etc.)
+  if (message.target === "content") {
+    const tabId = message.tabId || state.activeTabId;
+    if (tabId) {
+      chrome.tabs.sendMessage(tabId, message).catch(() => {});
     }
   }
 
