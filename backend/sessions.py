@@ -1,7 +1,6 @@
 """
-Session Manager
-Maintains client session state, rolling audio context buffer, video timestamp sync,
-and subtitle generation history for each connected browser tab.
+Production Real-Time Sliding Window Session Manager
+Eliminates hallucination loops and buffer growth by capping audio windows to 2.0s max.
 """
 import time
 import uuid
@@ -18,18 +17,15 @@ class TranscriptionSession:
     language: Optional[str] = "auto"
     model_size: str = "base"
 
-    # Rolling Audio Buffer (16-bit PCM)
+    # Strict sliding window buffer (capped at 2.5 seconds = 80,000 bytes for 16-bit 16kHz PCM)
     audio_buffer: bytearray = field(default_factory=bytearray)
-    processed_samples: int = 0
-
-    # Rolling Audio Prefix Context (1.0s of previous audio for acoustic continuity)
-    prefix_context: bytearray = field(default_factory=bytearray)
+    max_buffer_bytes: int = 16000 * 2 * 2.5  # 2.5s max window
 
     # Chunk Tracking
     current_chunk_id: str = field(default_factory=lambda: f"chunk_{uuid.uuid4().hex[:8]}")
-    chunk_accumulated_seconds: float = 0.0
+    last_transcribed_text: str = ""
 
-    # Timestamp & Latency Synchronization
+    # Timestamp Synchronization
     last_known_video_time: float = 0.0
     last_sync_timestamp: float = field(default_factory=time.time)
     user_time_offset: float = 0.0
@@ -37,7 +33,6 @@ class TranscriptionSession:
 
     def renew_chunk_id(self) -> str:
         self.current_chunk_id = f"chunk_{uuid.uuid4().hex[:8]}"
-        self.chunk_accumulated_seconds = 0.0
         return self.current_chunk_id
 
     def update_video_time(self, video_time: float, offset: float = 0.0):
@@ -47,39 +42,29 @@ class TranscriptionSession:
 
     def append_raw_pcm(self, pcm_bytes: bytes):
         self.audio_buffer.extend(pcm_bytes)
-        # 16-bit PCM mono = 2 bytes per sample @ 16kHz
-        new_seconds = len(pcm_bytes) / (self.sample_rate * 2)
-        self.chunk_accumulated_seconds += new_seconds
+        # Prevent buffer growth: retain only the latest 2.5 seconds
+        if len(self.audio_buffer) > self.max_buffer_bytes:
+            excess = len(self.audio_buffer) - self.max_buffer_bytes
+            self.audio_buffer = bytearray(self.audio_buffer[excess:])
 
-    def get_full_audio_float32(self, include_prefix: bool = True) -> np.ndarray:
-        """
-        Combines prefix context with current buffer into normalized float32 ndarray.
-        """
-        combined = bytearray()
-        if include_prefix and self.prefix_context:
-            combined.extend(self.prefix_context)
-        combined.extend(self.audio_buffer)
-
-        if not combined:
+    def get_audio_float32(self) -> np.ndarray:
+        """Converts accumulated buffer into normalized float32 ndarray."""
+        if not self.audio_buffer:
             return np.array([], dtype=np.float32)
 
-        int16_data = np.frombuffer(combined, dtype=np.int16)
+        int16_data = np.frombuffer(self.audio_buffer, dtype=np.int16)
         return int16_data.astype(np.float32) / 32768.0
 
-    def roll_buffer(self, keep_prefix_seconds: float = 1.0):
-        """
-        Stores rolling context prefix for acoustic continuity and clears processed buffer.
-        """
-        prefix_bytes = int(keep_prefix_seconds * self.sample_rate * 2)
-        if len(self.audio_buffer) > prefix_bytes:
-            self.prefix_context = bytearray(self.audio_buffer[-prefix_bytes:])
+    def clear_buffer(self, keep_tail_seconds: float = 0.3):
+        """Discards processed audio while keeping a tiny 300ms tail for boundary smoothness."""
+        keep_bytes = int(keep_tail_seconds * self.sample_rate * 2)
+        if len(self.audio_buffer) > keep_bytes:
+            self.audio_buffer = bytearray(self.audio_buffer[-keep_bytes:])
         else:
-            self.prefix_context = bytearray(self.audio_buffer)
-        self.audio_buffer.clear()
+            self.audio_buffer.clear()
 
     def get_current_video_base_time(self) -> float:
         elapsed = time.time() - self.last_sync_timestamp
-        # Latency compensation: subtract half RTT from calculated time
         latency_sec = (self.estimated_rtt_ms / 2.0) / 1000.0
         base = self.last_known_video_time + elapsed + self.user_time_offset - latency_sec
         return max(0.0, base)

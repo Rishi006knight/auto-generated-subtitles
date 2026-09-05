@@ -1,36 +1,34 @@
 """
-Production ASR Engine with High-Speed Real-Time CPU Optimization
-Optimizations:
-- beam_size=1 for 3x faster real-time streaming inference on CPU
-- cpu_threads scaled to available CPU cores
-- Persistent model caching in VRAM/RAM
-- Whisper Hallucination Defense
+Production High-Speed ASR Engine with Anti-Hallucination & Anti-Lag Defenses
 """
 import os
 import numpy as np
 import logging
 import asyncio
 import re
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple
 from subtitles import WordTimestamp
 
 logger = logging.getLogger(__name__)
 
+# Known phantom phrases generated during silence or background music
 HALLUCINATION_PATTERNS = [
     re.compile(r"thank\s+you\s+for\s+watching", re.IGNORECASE),
+    re.compile(r"thanks\s+for\s+watching", re.IGNORECASE),
     re.compile(r"please\s+subscribe", re.IGNORECASE),
     re.compile(r"subtitles\s+by", re.IGNORECASE),
     re.compile(r"transcribed\s+by", re.IGNORECASE),
     re.compile(r"like\s+and\s+subscribe", re.IGNORECASE),
     re.compile(r"watch\s+more\s+videos", re.IGNORECASE),
-    re.compile(r"(\b\w+\b)(?:\s+\1){3,}", re.IGNORECASE),
+    re.compile(r"see\s+you\s+in\s+the\s+next\s+video", re.IGNORECASE),
+    re.compile(r"(\b\w+\b)(?:\s+\1){2,}", re.IGNORECASE), # 3+ consecutive identical words (looping)
 ]
 
 
 class ASREngine:
     def __init__(
         self,
-        default_model_size: str = "base",
+        default_model_size: str = "base.en",
         device: str = "auto",
         compute_type: str = "default",
     ):
@@ -77,19 +75,18 @@ class ASREngine:
             self.current_model_size = model_size
             logger.info(f"Model '{model_size}' loaded successfully.")
         except Exception as e:
-            logger.error(f"Failed to load model on {self.device}: {e}. Retrying on CPU int8...")
+            logger.warning(f"Failed to load '{model_size}' on {self.device}: {e}. Falling back to 'base' on CPU int8.")
             self.device = "cpu"
             self.compute_type = "int8"
             from faster_whisper import WhisperModel
-            self.model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=self.num_threads)
-            self.current_model_size = model_size
+            self.model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=self.num_threads)
+            self.current_model_size = "base"
 
     async def transcribe_chunk_async(
         self,
         audio_float32: np.ndarray,
         language: Optional[str] = None,
         task: str = "transcribe",
-        initial_prompt: Optional[str] = None,
     ) -> Tuple[List[WordTimestamp], str, str]:
         async with self._lock:
             return await asyncio.to_thread(
@@ -97,7 +94,6 @@ class ASREngine:
                 audio_float32,
                 language,
                 task,
-                initial_prompt,
             )
 
     def transcribe_chunk(
@@ -105,41 +101,54 @@ class ASREngine:
         audio_float32: np.ndarray,
         language: Optional[str] = None,
         task: str = "transcribe",
-        initial_prompt: Optional[str] = None,
     ) -> Tuple[List[WordTimestamp], str, str]:
         if self.model is None or len(audio_float32) == 0:
             return [], "", language or "en"
 
         lang_arg = None if (not language or language.lower() in ("auto", "none")) else language
 
+        # If model is .en (English-only), omit language arg
+        if self.current_model_size.endswith(".en"):
+            lang_arg = "en"
+
         try:
-            # beam_size=1 (greedy search) is 3x faster than beam_size=5 for streaming real-time
             segments, info = self.model.transcribe(
                 audio_float32,
                 language=lang_arg,
                 task=task,
-                beam_size=1,
+                beam_size=1,                         # 3x faster than beam_size=5
+                best_of=1,                           # single candidate for lowest latency
+                temperature=0.0,                     # deterministic decoding (no sampling noise)
+                condition_on_previous_text=False,    # CRITICAL: Prevents hallucination feedback loops
+                no_speech_threshold=0.5,             # Strictly drops silence
+                compression_ratio_threshold=2.2,     # Drops repetitive text loops
+                log_prob_threshold=-1.0,             # Drops low-confidence hallucinations
                 word_timestamps=True,
-                vad_filter=False,
-                initial_prompt=initial_prompt,
-                condition_on_previous_text=False,
-                temperature=0.0,
-                no_speech_threshold=0.6,
+                vad_filter=False,                    # External VAD handled upstream
             )
 
-            detected_lang = info.language
+            detected_lang = getattr(info, "language", language or "en")
             words: List[WordTimestamp] = []
             valid_text_parts = []
 
             for segment in segments:
-                if getattr(segment, "no_speech_prob", 0.0) > 0.6:
+                # 1. Reject high no_speech probability
+                if getattr(segment, "no_speech_prob", 0.0) > 0.5:
                     continue
+
+                # 2. Reject low average log-probability
                 if getattr(segment, "avg_logprob", 0.0) < -1.0:
                     continue
-                if getattr(segment, "compression_ratio", 1.0) > 2.4:
+
+                # 3. Reject high compression ratio (hallucinatory repetition)
+                if getattr(segment, "compression_ratio", 1.0) > 2.2:
                     continue
 
                 clean_seg_text = segment.text.strip()
+                if not clean_seg_text:
+                    continue
+
+                # 4. Reject known hallucination regexes
                 if any(pat.search(clean_seg_text) for pat in HALLUCINATION_PATTERNS):
                     continue
 
@@ -147,7 +156,7 @@ class ASREngine:
 
                 if segment.words:
                     for w in segment.words:
-                        if w.probability >= 0.2:
+                        if getattr(w, "probability", 1.0) >= 0.25:
                             words.append(
                                 WordTimestamp(
                                     word=w.word,
@@ -170,5 +179,5 @@ class ASREngine:
             return words, full_text, detected_lang
 
         except Exception as e:
-            logger.error(f"Error during transcription inference: {e}", exc_info=True)
+            logger.error(f"Transcription error: {e}")
             return [], "", language or "en"
