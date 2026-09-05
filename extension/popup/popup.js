@@ -1,5 +1,5 @@
 /**
- * Subtitle AI - Popup Controller (Vanilla JS build)
+ * Subtitle AI - Popup Controller (with Live Health Check & Clear Error Reporting)
  */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -45,45 +45,94 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
-  chrome.runtime.sendMessage({ target: "background", type: "GET_STATE" }, (res) => {
+  // 1. Live Backend Health Check
+  async function checkBackendHealth() {
+    try {
+      const httpUrl = (wsUrlInput.value || "ws://127.0.0.1:8000/ws/transcribe")
+        .replace(/^ws:\/\//, "http://")
+        .replace(/^wss:\/\//, "https://")
+        .replace(/\/ws\/transcribe.*$/, "/health");
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+      const res = await fetch(httpUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        return { online: true, model: data.model, device: data.device };
+      }
+    } catch (e) {}
+    return { online: false };
+  }
+
+  // Initial state check
+  chrome.runtime.sendMessage({ target: "background", type: "GET_STATE" }, async (res) => {
     if (res) {
       appState = res;
-      updateStatusUI(appState.status, appState.isCapturing);
+      if (appState.isCapturing) {
+        updateStatusUI(appState.status, true);
+        return;
+      }
+    }
+
+    const health = await checkBackendHealth();
+    if (health.online) {
+      updateStatusUI("idle", false, `Backend Online (${health.device.toUpperCase()})`);
+    } else {
+      updateStatusUI("warning", false, "Backend Offline (Start Python Server)");
     }
   });
 
   applySettingsToInputs(currentSettings);
   updateLivePreview(currentSettings);
 
+  // Toggle Start / Stop
   toggleBtn.addEventListener("click", async () => {
     if (appState.isCapturing) {
       chrome.runtime.sendMessage({ target: "background", type: "STOP_CAPTURE" }, () => {
         appState.isCapturing = false;
-        updateStatusUI("idle", false);
+        updateStatusUI("idle", false, "Stopped");
       });
-    } else {
-      updateStatusUI("connecting", false);
-      chrome.runtime.sendMessage(
-        {
-          target: "background",
-          type: "START_CAPTURE",
-          payload: {
-            wsUrl: wsUrlInput.value,
-            language: langSelect.value,
-            model: modelSelect.value,
-            offset: currentSettings.offset || 0.0,
-          },
-        },
-        (res) => {
-          if (res && res.success) {
-            appState.isCapturing = true;
-            updateStatusUI("connected", true);
-          } else {
-            updateStatusUI("error", false);
-          }
-        }
-      );
+      return;
     }
+
+    // Check active tab first
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab || !activeTab.url || activeTab.url.startsWith("chrome://") || activeTab.url.startsWith("edge://")) {
+      updateStatusUI("error", false, "Open a video page (e.g. YouTube or testbed player)");
+      return;
+    }
+
+    // Check backend health before initiating capture
+    updateStatusUI("connecting", false, "Connecting to Backend...");
+    const health = await checkBackendHealth();
+    if (!health.online) {
+      updateStatusUI("error", false, "Backend server offline at 127.0.0.1:8000");
+      return;
+    }
+
+    chrome.runtime.sendMessage(
+      {
+        target: "background",
+        type: "START_CAPTURE",
+        payload: {
+          wsUrl: wsUrlInput.value,
+          language: langSelect.value,
+          model: modelSelect.value,
+          offset: currentSettings.offset || 0.0,
+        },
+      },
+      (res) => {
+        if (res && res.success) {
+          appState.isCapturing = true;
+          updateStatusUI("connected", true, "Active & Generating");
+        } else {
+          updateStatusUI("error", false, res?.error || "Capture Failed");
+        }
+      }
+    );
   });
 
   langSelect.addEventListener("change", () => {
@@ -265,25 +314,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  function updateStatusUI(status, isCapturing) {
+  function updateStatusUI(status, isCapturing, customText) {
     statusDot.className = `status-dot ${status}`;
     if (status === "connected" || isCapturing) {
-      statusText.textContent = "Connected & Active";
+      statusText.textContent = customText || "Connected & Active";
       toggleBtn.classList.add("capturing");
       btnIcon.textContent = "⏹";
       btnText.textContent = "Stop Subtitles";
     } else if (status === "connecting") {
-      statusText.textContent = "Connecting to ASR...";
+      statusText.textContent = customText || "Connecting to ASR...";
       toggleBtn.classList.remove("capturing");
       btnIcon.textContent = "⌛";
       btnText.textContent = "Connecting...";
     } else if (status === "error") {
-      statusText.textContent = "Connection Error";
+      statusText.textContent = customText || "Connection Error";
       toggleBtn.classList.remove("capturing");
       btnIcon.textContent = "▶";
       btnText.textContent = "Retry Generation";
+    } else if (status === "warning") {
+      statusText.textContent = customText || "Backend Offline";
+      toggleBtn.classList.remove("capturing");
+      btnIcon.textContent = "▶";
+      btnText.textContent = "Generate Subtitles";
     } else {
-      statusText.textContent = "Ready";
+      statusText.textContent = customText || "Ready";
       toggleBtn.classList.remove("capturing");
       btnIcon.textContent = "▶";
       btnText.textContent = "Generate Subtitles";
